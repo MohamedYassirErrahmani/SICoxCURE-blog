@@ -1,0 +1,680 @@
+---
+title: "SICoxCURE: Single-Index/Cox Mixture Cure Model"
+subtitle: "A complete guide to fitting, interpreting, and visualizing survival cure models in R"
+author:
+  - name: Mohamed Yassir Errahmani
+    affiliation: University of Montpellier
+    email: mohamed-yassir.errahmani@umontpellier.fr
+    note: "Developer"
+  - name: Maïlis Amico
+    affiliation: University of Montpellier
+    email: mailis.amico@umontpellier.fr
+date: today
+date-format: "MMMM D, YYYY"
+format:
+  html:
+    theme: [cosmo, custom.scss]
+    toc: true
+    toc-depth: 3
+    toc-title: "Contents"
+    toc-location: left
+    number-sections: true
+    code-fold: false
+    code-tools: false
+    code-copy: true
+    highlight-style: github
+    fig-width: 8
+    fig-height: 5
+    embed-resources: true
+    smooth-scroll: true
+    page-layout: article
+    grid:
+      sidebar-width: 220px
+      body-width: 900px
+      margin-width: 50px
+bibliography: references.bib
+csl: https://www.zotero.org/styles/biometrics
+execute:
+  echo: true
+  warning: false
+  message: false
+  eval: false
+---
+
+```{r}
+#| echo: false
+#| eval: true
+# Package check
+if (!requireNamespace("SICoxCURE", quietly = TRUE)) {
+  message("Install SICoxCURE to run the examples")
+}
+```
+
+## Overview {#overview}
+
+The **SICoxCURE** package implements the
+**Single-Index/Cox (SIC) mixture cure model** proposed by Amico, Van Keilegom and Legrand (2019). It was developed by **Mohamed Yassir Errahmani**
+(University of Montpellier) based on the theoretical work
+of Amico, Van Keilegom and Legrand.
+
+### The Model
+
+In survival analysis, a **cure model** is appropriate when a
+fraction of subjects will never experience the event of interest
+--- the so-called *cured* subjects. The SIC mixture cure model
+writes the population survival function as:
+
+$$
+S(t \mid \mathbf{x}, \mathbf{z}) =
+\underbrace{[1 - p(\mathbf{x})]}_{\text{cured fraction}}
++
+\underbrace{p(\mathbf{x}) \cdot S_u(t \mid \mathbf{z})}_{\text{uncured fraction}}
+$$
+
+where:
+
+- $p(\mathbf{x}) = g(\boldsymbol{\gamma}^\top \mathbf{x})$ is
+  the **incidence** (probability of being uncured), modeled via
+  a single-index structure with **unknown link function** $g$
+  estimated nonparametrically using Nadaraya-Watson kernel
+  smoothing.
+- $S_u(t \mid \mathbf{z})$ is the **latency** (conditional
+  survival of uncured subjects), modeled via a **Cox
+  proportional hazards model**.
+
+### Estimation
+
+Estimation uses an **EM algorithm**:
+
+| Step | What it does |
+|------|-------------|
+| **E-step** | Computes posterior weights $W_i = P(B_i=1 \mid \text{data}, \theta^{(m-1)})$ |
+| **M-step (incidence)** | Updates $\hat{\boldsymbol{\gamma}}$ and $\hat{g}(\cdot)$ via Nadaraya-Watson |
+| **M-step (latency)** | Updates $\hat{\boldsymbol{\beta}}$ and $\hat{\Lambda}_0$ via partial likelihood |
+
+The bandwidth $h$ is selected at each iteration by
+**likelihood cross-validation**.
+
+::: {.callout-note}
+## When is a cure model appropriate?
+- Event rate $< 50\%$ (many potential long-term survivors)
+- Visible **plateau** in the Kaplan-Meier estimator ($> 10\%$)
+- Sufficient follow-up time beyond the last observed event
+:::
+
+---
+
+## Installation {#installation}
+
+### From CRAN
+
+```r
+install.packages("SICoxCURE")
+```
+
+### From GitHub (development version)
+
+```r
+# install.packages("devtools")
+devtools::install_github("MohamedYassirErrahmani/SICoxCURE")
+```
+
+### Load and check
+
+```r
+library(SICoxCURE)
+
+# Check version
+packageVersion("SICoxCURE")
+#> [1] '0.1.2'
+
+# List available functions
+ls("package:SICoxCURE")
+#> [1] "bootstrap_se"  "plot_link"
+#>     "plot_survival" "sic_fit"
+
+# Check S3 methods
+methods(class = "sic_fit")
+#> [1] predict   print   summary
+```
+
+---
+
+## Data Preparation {#data}
+
+### Required structure
+
+| Argument | Type | Description |
+|----------|------|-------------|
+| `Y` | Numeric vector $(n)$ | Follow-up times $Y_i = \min(T_i, C_i)$ |
+| `delta` | Integer vector $(n)$ | Event indicators (1=event, 0=censored) |
+| `X` | Matrix $(n \times d)$ | Incidence covariates for $\boldsymbol{\gamma}^\top\mathbf{X}$ |
+| `Z` | Matrix $(n \times q)$ | Latency covariates for Cox model |
+
+### How to organize your own data
+
+Before fitting the model, prepare your data as follows:
+
+```r
+# Load your data
+dat <- read.csv("your_data.csv")
+
+# Remove missing values
+dat <- na.omit(dat)
+
+# Prepare vectors and matrices
+Y     <- dat$follow_up_time    # follow-up times
+delta <- dat$event_indicator   # 1=event, 0=censored
+
+# Incidence covariates (X)
+X <- as.matrix(dat[, c("age", "ER_status", "tumor_size")])
+
+# Latency covariate (Z)
+Z <- as.matrix(dat[, "ER_status", drop = FALSE])
+
+# Check
+cat(sprintf("n=%d | Events=%.1f%% | Censored=%.1f%%\n",
+            nrow(dat),
+            100 * mean(delta),
+            100 * mean(delta == 0)))
+```
+
+::: {.callout-important}
+## Key points
+- **X** and **Z** can contain the same, overlapping, or
+  completely different covariates.
+- Covariates in **X** are automatically standardized
+  (centered and scaled) by `sic_fit()` when
+  `standardize_X = TRUE` (default).
+- Missing values must be removed before calling `sic_fit()`.
+:::
+
+### Using a data.frame
+
+```r
+dat <- data.frame(Y=Y, delta=delta,
+                  X1=X[,1], X2=X[,2],
+                  X3=X[,3], X4=X[,4],
+                  Z=Z[,1])
+
+fit <- sic_fit(
+  data      = dat,
+  col_Y     = "Y",
+  col_delta = "delta",
+  cols_X    = c("X1","X2","X3","X4"),
+  cols_Z    = "Z"
+)
+```
+
+---
+
+## Fitting the Model: `sic_fit()` {#fitting}
+
+### Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `Y`, `delta`, `X`, `Z` | --- | Required inputs |
+| `kernel` | `"epanechnikov"` | Kernel function |
+| `h_range` | `c(0.4, 1.0)` | Bandwidth search interval |
+| `h_step` | `0.001` | Grid step (601 values for fine accuracy) |
+| `constraint` | `"gamma1"` | Fix $\gamma_1 = 1$ |
+| `tol` | `1e-5` | EM convergence tolerance |
+| `max_iter` | `500L` | Maximum EM iterations |
+| `standardize_X` | `TRUE` | Standardize X (recommended) |
+| `bootstrap` | `FALSE` | Compute SE automatically |
+| `B` | `250L` | Bootstrap samples |
+| `boot_seed` | `NULL` | Seed for reproducibility |
+| `plot` | `FALSE` | Auto-plot after fitting |
+| `verbose` | `1L` | 0=silent, 1=progress, 2=detail |
+
+### Workflow A: All-in-One (Recommended)
+
+```r
+library(SICoxCURE)
+set.seed(42)
+n     <- 200
+X     <- matrix(rnorm(n * 4), n, 4)
+Z     <- matrix(rbinom(n, 1L, 0.6), n, 1)
+p     <- 1 / (1 + exp(-X %*% c(1, -0.5, 0.3, -0.2)))
+B     <- rbinom(n, 1L, p)
+T0    <- ifelse(B == 1, rexp(n, 0.5), Inf)
+C     <- rexp(n, 0.3)
+Y     <- pmin(T0, C)
+delta <- as.integer(T0 <= C & T0 < Inf)
+
+fit <- sic_fit(
+  Y           = Y,
+  delta       = delta,
+  X           = X,
+  Z           = Z,
+  h_step      = 0.05,
+  bootstrap   = TRUE,        # SE computed automatically
+  B           = 250L,        # B=250 
+  boot_seed   = 42L,
+  plot        = TRUE,        # auto-plot
+  plot_Z      = matrix(c(0, 1), ncol = 1),
+  plot_labels = c("Z = 0", "Z = 1"),
+  verbose     = 1L
+)
+```
+
+**Console output:**
+
+```
+=== Fitting SIC Mixture Cure Model ===
+Step 1/3: Data validation...
+Step 2/3: Initialisation...
+Step 3/3: EM algorithm...
+  |===================================| 100%
+✓ Model converged successfully at iteration 8
+  (criterion = 3.21e-06 < tol = 1e-05)
+  Final complete log-likelihood : -412.38
+Computing bootstrap standard errors...
+Done. 250/250 iterations succeeded.
+```
+
+### Workflow B: Step by Step
+
+```r
+# Step 1: Fit
+fit <- sic_fit(Y, delta, X, Z,
+               h_step = 0.05, verbose = 1L)
+
+# Step 2: Bootstrap SE
+se <- bootstrap_se(fit, B = 250L,
+                   parallel = TRUE, seed = 42L)
+
+# Step 3: Summary with p-values
+summary(fit, se = se)
+
+# Step 4: Plots
+plot_link(fit)
+plot_survival(fit,
+              newZ         = matrix(c(0, 1), ncol = 1),
+              group_labels = c("Z = 0", "Z = 1"))
+
+# Step 5: Predict on new data
+pred <- predict(fit,
+                newX = X[1:5, ],
+                newZ = Z[1:5, , drop=FALSE],
+                type = "all")
+```
+
+---
+
+## Output: `sic_fit` Object {#output}
+
+The function returns an S3 object of class `"sic_fit"`:
+
+| Element | Type | Description |
+|---------|------|-------------|
+| `gamma` | Vector $(d)$ | $\hat{\boldsymbol{\gamma}}$ (incidence coefficients) |
+| `beta` | Vector $(q)$ | $\hat{\boldsymbol{\beta}}$ (latency coefficients) |
+| `p_hat` | Vector $(n)$ | Estimated uncure probabilities $\hat{p}(\mathbf{x}_i)$ |
+| `Su_hat` | Vector $(n)$ | Estimated latency $\hat{S}_u(Y_i \mid \mathbf{z}_i)$ |
+| `breslow` | List | Breslow estimator |
+| `h` | Scalar | Selected bandwidth $h_{\mathrm{CV}}$ |
+| `W` | Vector $(n)$ | Final EM weights $\hat{W}_i$ |
+| `converged` | Logical | Did the EM converge? |
+| `n_iter` | Integer | Number of EM iterations |
+| `se` | List | Bootstrap SE (if `bootstrap=TRUE`) |
+
+### `print()` method
+
+```r
+print(fit)
+```
+
+```
+=== SIC Mixture Cure Model ===
+
+n = 200 | events = 89 | kernel = epanechnikov | h = 0.5500
+Convergence: YES in 8 iterations (crit = 3.21e-06)
+
+Incidence coefficients (gamma):
+    X1     X2     X3     X4
+1.0000 -0.4832  0.2876 -0.1954
+
+Latency coefficients (beta):
+    Z
+1.3847
+
+Use summary() for standard errors and p-values.
+```
+
+### `summary()` method
+
+```r
+summary(fit)   # uses fit$se if bootstrap=TRUE
+```
+
+```
+=== Summary: SIC Mixture Cure Model ===
+
+Data:
+  n = 200 | Events: 89 (44.5%) | tau = 3.4521
+  Plateau: 48 observations (24.0%)
+
+Model:
+  Kernel: epanechnikov | h = 0.5500
+  Constraint: 'gamma1' | Standardized X: yes
+
+Convergence: YES in 8 iterations (crit = 3.21e-06)
+
+Incidence (gamma):
+   Estimate Std.Error z.value Pr(>|z|)
+X1   1.0000        --      --       --
+X2  -0.4832    0.1943  -2.487   0.0129  *
+X3   0.2876    0.2341   1.229   0.2192
+X4  -0.1954    0.1876  -1.042   0.2974
+
+Latency (beta):
+   Estimate Std.Error z.value Pr(>|z|)
+Z    1.3847    0.2134   6.489  <0.001 ***
+
+Signif. codes: '<0.001' '***' 0.001 '**' 0.01 '*' 0.05
+```
+
+::: {.callout-tip}
+## Reading the summary
+- **p-values below 0.001** are displayed as `<0.001`.
+- **Standard errors** require bootstrap (via `bootstrap=TRUE`
+  or a separate `bootstrap_se()` call).
+- $\gamma_1 = 1$ is fixed by the identifiability constraint
+  and has no SE or p-value.
+:::
+
+---
+
+## Bootstrap Standard Errors {#bootstrap}
+
+```r
+se <- bootstrap_se(
+  fit      = fit,
+  B        = 250L,      
+  parallel = TRUE,      # use multiple CPU cores
+  seed     = 42L,       # reproducibility
+  verbose  = TRUE
+)
+
+print(se)
+```
+
+```
+=== Bootstrap Standard Errors (SICoxCURE) ===
+
+Bootstrap samples : 250 / 250 succeeded
+
+Incidence (gamma):
+    X1     X2     X3     X4
+0.0000 0.1943 0.2341 0.1876
+
+Latency (beta):
+    Z
+0.2134
+
+Use summary(fit, se = <this object>) for p-values.
+```
+
+::: {.callout-note}
+## Parallel computing
+`parallel = TRUE` uses all available CPU cores minus one,
+keeping one free for the operating system. On a machine
+with 8 cores, this reduces bootstrap time from ~8 hours
+(sequential) to ~1 hour.
+:::
+
+---
+
+## Graphical Functions {#plots}
+
+### `plot_link()`: Estimated Link Function
+
+```r
+plot_link(fit,
+          main = "Estimated link function g",
+          col  = "blue",
+          lwd  = 2)
+```
+
+This plots $\hat{g}(u)$ against the single index
+$\hat{\boldsymbol{\gamma}}^\top \mathbf{x}_i$ for training
+observations.
+
+### `plot_survival()`: Latency Survival Curves
+
+```r
+plot_survival(
+  fit,
+  newZ         = matrix(c(0, 1), ncol = 1),
+  group_labels = c("Z = 0", "Z = 1"),
+  cols         = c("red", "blue"),
+  main         = "Estimated latency survival S_u(t|z)"
+)
+```
+
+### Integrated in `sic_fit()`
+
+Both functions are called automatically with `plot = TRUE`:
+
+```r
+fit <- sic_fit(Y, delta, X, Z,
+               plot        = TRUE,
+               plot_Z      = matrix(c(0, 1), ncol = 1),
+               plot_labels = c("Z = 0", "Z = 1"))
+```
+
+---
+
+## Predictions: `predict()` {#predict}
+
+```r
+# New observations
+X_new <- matrix(rnorm(5 * 4), 5, 4)
+Z_new <- matrix(rbinom(5, 1L, 0.6), 5, 1)
+
+# All predictions
+pred <- predict(fit,
+                newX   = X_new,
+                newZ   = Z_new,
+                t_eval = c(0.5, 1, 2, 5),
+                type   = "all")
+```
+
+### Components of `pred`
+
+| Component | Type | Description |
+|-----------|------|-------------|
+| `pred$incidence` | Vector $(m)$ | $\hat{p}(\mathbf{x}_i)$ for each patient |
+| `pred$latency` | Matrix $(m \times T)$ | $\hat{S}_u(t \mid \mathbf{z}_i)$ |
+| `pred$survival` | Matrix $(m \times T)$ | $\hat{S}(t \mid \mathbf{x}_i, \mathbf{z}_i)$ |
+| `pred$t_eval` | Vector $(T)$ | Time points |
+| `pred$index` | Vector $(m)$ | $\hat{\boldsymbol{\gamma}}^\top \mathbf{x}_i$ |
+
+```r
+# Display as table
+tab <- data.frame(
+  Patient   = 1:5,
+  Index     = round(pred$index, 4),
+  p_x       = round(pred$incidence, 4),
+  S_t1      = round(pred$survival[, 2], 4),
+  S_t5      = round(pred$survival[, 4], 4)
+)
+colnames(tab) <- c("Patient","Index","p(x)",
+                   "S(t=1|x,z)","S(t=5|x,z)")
+print(tab)
+```
+
+::: {.callout-tip}
+## Interpreting predictions
+- **$p(x) \approx 0$** $\Rightarrow$ patient likely **cured**
+  $\Rightarrow$ $S(t) \approx 1$
+- **$p(x) \approx 1$** $\Rightarrow$ patient likely
+  **uncured** $\Rightarrow$ poor prognosis
+- The formula $S = 1 - p(x) + p(x) \cdot S_u$ guarantees
+  that cured patients always have $S \to 1$
+:::
+
+---
+
+## Real Data Example: VERIDEX {#veridex}
+
+This example reproduces the breast cancer application of
+@amico2019. The dataset consists of 286 patients
+with lymph-node-negative breast cancer (@wang2005).
+
+```r
+library(SICoxCURE)
+
+# Load data
+dat <- read.table("VERIDEX-survival.txt",
+                  header = TRUE, sep = "\t")
+colnames(dat) <- c("PID","GEO","lymph","time",
+                   "status","ER","brain")
+dat$ER_bin <- as.integer(dat$ER == "ER+")
+
+# Train/test split (2/3 - 1/3 )
+set.seed(2019)
+idx   <- sample(nrow(dat), floor(2/3 * nrow(dat)))
+train <- dat[idx, ]
+X_tr  <- as.matrix(train[, "ER_bin", drop=FALSE])
+Z_tr  <- as.matrix(train[, "ER_bin", drop=FALSE])
+
+# Fit SICoxCURE (B=250 )
+fit <- sic_fit(
+  Y           = train$time,
+  delta       = train$status,
+  X           = X_tr,
+  Z           = Z_tr,
+  h_step      = 0.001,
+  bootstrap   = TRUE,
+  B           = 250L,
+  boot_seed   = 2019L,
+  plot        = TRUE,
+  plot_Z      = matrix(c(0, 1), ncol = 1),
+  plot_labels = c("ER- (Z=0)", "ER+ (Z=1)"),
+  verbose     = 1L
+)
+
+# Summary with p-values
+summary(fit)
+```
+
+```
+Latency (beta):
+          Estimate Std.Error z.value Pr(>|z|)
+ER_bin     -0.9279    0.2753  -3.370  <0.001 ***
+```
+
+---
+
+## Tips and Recommendations {#tips}
+
+### Bandwidth selection
+
+::: {.callout-warning}
+## Bandwidth at the boundary
+If $h_{\mathrm{CV}} = h_{\min}$ or
+$h_{\mathrm{CV}} = h_{\max}$, the true optimum may lie
+outside the search interval. Extend `h_range` accordingly.
+:::
+
+```r
+# Quick exploration (13 values)
+fit_fast  <- sic_fit(Y, delta, X, Z, h_step = 0.05)
+
+# Publication quality (601 values)
+fit_final <- sic_fit(Y, delta, X, Z, h_step = 0.001)
+```
+
+### Bootstrap recommendations
+
+```r
+# Exploration
+se_quick <- bootstrap_se(fit, B = 30L, parallel = FALSE)
+
+# Publication quality
+se_final <- bootstrap_se(fit, B = 250L,
+                         parallel = TRUE, seed = 42L)
+```
+
+---
+
+## Function Reference {#reference}
+
+### Public functions
+
+| Function | Description |
+|----------|-------------|
+| `sic_fit()` | Main function. Fits the SIC model via EM |
+| `bootstrap_se()` | Bootstrap SE for $\hat{\boldsymbol{\gamma}}$ and $\hat{\boldsymbol{\beta}}$ |
+| `plot_link()` | Plot the estimated link function $\hat{g}(u)$ |
+| `plot_survival()` | Plot latency survival $\hat{S}_u(t \mid \mathbf{z})$ |
+| `predict.sic_fit()` | Predict $\hat{p}(\mathbf{x})$, $\hat{S}_u$, $\hat{S}$ for new data |
+| `print.sic_fit()` | Compact display of a `sic_fit` object |
+| `summary.sic_fit()` | Coefficient table with SE and p-values |
+| `print.sic_bootstrap()` | Display a `sic_bootstrap` object |
+
+### Internal functions
+
+| File | Function | Role |
+|------|----------|------|
+| `em_algorithm.R` | `run_em()` | Main EM loop |
+| `estep.R` | `estep()` | E-step: compute $W_i$ |
+| `mstep_incidence.R` | `mstep_incidence()` | M-step for $\boldsymbol{\gamma}$ |
+| `mstep_latency.R` | `mstep_latency()` | M-step for $\boldsymbol{\beta}$ |
+| `nadaraya_watson.R` | `nw_loo()` | Leave-one-out NW estimator |
+| `nadaraya_watson.R` | `select_bandwidth()` | CV bandwidth selection |
+| `utils.R` | 17 functions | Kernels, Breslow, index, ... |
+
+---
+
+
+## Citation {#citation}
+
+If you use **SICoxCURE** in your research, please cite both
+the package and the original article:
+
+### Cite the package
+
+::: {.callout-tip}
+## Copy BibTeX
+```bibtex
+@Manual{SICoxCURE2026,
+  title  = {{SICoxCURE}: Single-Index/Cox Mixture Cure Model},
+  author = {Errahmani, {Mohamed Yassir} and Amico, {Ma{\"{i}}lis}},
+  year   = {2026},
+  note   = {R package version 0.1.2},
+  url    = {https://github.com/MohamedYassirErrahmani/SICoxCURE}
+}
+```
+:::
+
+### Cite the article
+
+::: {.callout-tip}
+## Copy BibTeX
+```bibtex
+@Article{amico2019,
+  title   = {The single-index/{C}ox mixture cure model},
+  author  = {Amico, {Ma{\"{i}}lis} and
+             Van Keilegom, Ingrid and
+             Legrand, Catherine},
+  journal = {Biometrics},
+  year    = {2019},
+  volume  = {75},
+  number  = {2},
+  pages   = {452--462},
+  doi     = {10.1111/biom.12999}
+}
+```
+:::
+
+---
+
+## References {#references}
+
+::: {#refs}
+:::
+
